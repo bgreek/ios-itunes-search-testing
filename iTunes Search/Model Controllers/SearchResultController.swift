@@ -8,39 +8,97 @@
 
 import Foundation
 
+protocol NetworkSessionProtocol {
+    func fetch(with request: URLRequest, completionHandler: @escaping (Data?, URLResponse?, Error?) -> Void)
+}
+
+extension URLSession: NetworkSessionProtocol {
+    func fetch(with request: URLRequest, completionHandler: @escaping (Data?, URLResponse?, Error?) -> Void) {
+        
+        let dataTask = self.dataTask(with: request, completionHandler: completionHandler)
+        
+        dataTask.resume()
+    }
+}
+
+class MockURLSession: NetworkSessionProtocol {
+    
+    let data: Data?
+    let error: Error?
+    init(data: Data?, error: Error?) {
+        self.data = data
+        self.error = error
+    }
+    
+    func fetch(with request: URLRequest, completionHandler: @escaping (Data?, URLResponse?, Error?) -> Void) {
+        
+        DispatchQueue.global().async {
+            completionHandler(self.data, nil, self.error)
+        }
+    }
+}
+
 class SearchResultController {
     
-    func performSearch(for searchTerm: String, resultType: ResultType, completion: @escaping () -> Void) {
+    enum PerformSearchError: Error {
+        case requestURLisNil
+        case network(Error)
+        case invalidStatNoErrorButNoData
+        case invalidJSON(Error)
+    }
+    
+    // Properties
+    let baseURL = URL(string: "https://itunes.apple.com/search")!
+    
+    // Preparing the parameters for our URL request
+    func performSearch(for searchTerm: String, resultType: ResultType,
+                       urlSession: NetworkSessionProtocol, completion: @escaping (Result<[SearchResult], PerformSearchError>) -> Void) {
         
         var urlComponents = URLComponents(url: baseURL, resolvingAgainstBaseURL: true)
         let parameters = ["term": searchTerm,
                           "entity": resultType.rawValue]
+        
+        // Compact Map -> Transforms the individual elements of a collections into some other element type while ignoring any optionals that return a nil value
+        // (key, value) -> (URLQueryItem)
         let queryItems = parameters.compactMap { URLQueryItem(name: $0.key, value: $0.value) }
         urlComponents?.queryItems = queryItems
         
-        guard let requestURL = urlComponents?.url else { return }
-
+        // Prevent excecution if requestURL is nil.
+        guard let requestURL = urlComponents?.url else {
+            completion(.failure(.requestURLisNil))
+            return
+        }
+        
+        // requestURL is not nil, continued after guard.
         var request = URLRequest(url: requestURL)
         request.httpMethod = HTTPMethod.get.rawValue
         
-        let dataTask = URLSession.shared.dataTask(with: request) { (data, _, error) in
+        urlSession.fetch(with: request) { (possibleData, _, possibleError) in
+        
             
-            if let error = error { NSLog("Error fetching data: \(error)") }
-            guard let data = data else { completion(); return }
-            
-            do {
-                let jsonDecoder = JSONDecoder()
-                let searchResults = try jsonDecoder.decode(SearchResults.self, from: data)
-                self.searchResults = searchResults.results
-            } catch {
-                print("Unable to decode data into object of type [SearchResult]: \(error)")
+            // What queue are we in?
+            // We are in a background queue, we dont know which queue but not main.
+            // There are no networking errors.
+            guard possibleError == nil else {
+                // We are done.
+                completion(.failure(.network(possibleError!)))
+                return
             }
             
-            completion()
+            // We did recieve data from the API. Completions means we are done.
+            guard let data = possibleData else {
+                completion(.failure(.invalidStatNoErrorButNoData))
+                return
+            }
+            
+            do {
+                // Decode the data ewe recieved into JSON.
+                let jsonDecoder = JSONDecoder()
+                let searchResults = try jsonDecoder.decode(SearchResults.self, from: data)
+                completion(.success(searchResults.results))
+            } catch {
+                completion(.failure(.invalidJSON(error)))
+            }
         }
-        dataTask.resume()
     }
-    
-    let baseURL = URL(string: "https://itunes.apple.com/search")!
-    var searchResults: [SearchResult] = []
 }
